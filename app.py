@@ -6,6 +6,7 @@ import pandas as pd
 import streamlit as st
 
 from src.entrenar import cargar_datos
+from src.deteccion_imagen import analizar_imagen
 from src.evaluar import evaluar
 from src.predecir import cargar_modelo, predecir
 from src.validaciones import validar_prediccion, validar_patologia, TIPOS, SEVERIDADES
@@ -180,48 +181,56 @@ with tab4:
     st.plotly_chart(grafico_escenarios(df_esc), use_container_width=True)
 
 with tab5:
-    st.subheader("Evaluacion visual del pavimento")
-    st.write(
-        "Sube una foto y registra la condicion observada. Estas etiquetas serviran "
-        "como ejemplos para entrenar un clasificador de imagenes."
-    )
-    st.info(
-        "La app aun no determina la condicion automaticamente a partir de la foto. "
-        "La condicion que selecciones sera una etiqueta registrada por el usuario."
+    st.subheader("Deteccion de fallas en imagenes")
+    st.caption("Carga una foto del pavimento para ver las zonas oscuras resaltadas y registrar la inspeccion.")
+    st.warning(
+        "La zona roja se calcula con una regla visual de contraste. Es una estimacion preliminar, "
+        "no un modelo entrenado ni un calculo PCI oficial. Sombras, manchas y juntas pueden marcarse como fallas."
     )
     imagen = st.file_uploader(
-        "Selecciona una foto del pavimento", type=["jpg", "jpeg", "png"], key="foto_condicion"
+        "Subir imagen del pavimento", type=["jpg", "jpeg", "png"], key="foto_condicion"
     )
     if imagen is not None:
-        st.image(imagen, caption=imagen.name, use_container_width=True)
-        condicion = st.radio(
-            "¿Que condicion observas?",
-            ["Buen estado", "Mal estado"],
-            horizontal=True,
-            key="condicion_foto",
-        )
-        if st.button("Guardar foto y condicion", key="guardar_foto_condicion"):
-            os.makedirs(FOTOS, exist_ok=True)
-            nombre_seguro = os.path.basename(imagen.name).replace("\\", "_").replace("/", "_")
-            nombre = f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{nombre_seguro}"
-            ruta_foto = os.path.join(FOTOS, nombre)
-            with open(ruta_foto, "wb") as archivo:
-                archivo.write(imagen.getvalue())
+        analisis = analizar_imagen(imagen.getvalue())
+        foto_original, foto_marcada = st.columns(2)
+        with foto_original:
+            st.image(analisis["original"], caption="Imagen original", use_container_width=True)
+        with foto_marcada:
+            st.image(analisis["superposicion"], caption="Zonas resaltadas en rojo", use_container_width=True)
 
-            ruta_etiquetas = "data/etiquetas_imagenes.csv"
-            fila_etiqueta = pd.DataFrame(
-                [[datetime.now().isoformat(timespec="seconds"), nombre, condicion]],
-                columns=["fecha", "archivo", "condicion"],
-            )
-            fila_etiqueta.to_csv(
-                ruta_etiquetas,
-                mode="a",
-                header=not os.path.exists(ruta_etiquetas),
-                index=False,
-            )
-            st.success(f"Foto guardada con la etiqueta: {condicion}.")
+        metrica1, metrica2, metrica3 = st.columns(3)
+        metrica1.metric("Area resaltada", f"{analisis['porcentaje']:.2f}%")
+        metrica2.metric("Regiones detectadas", analisis["cantidad"])
+        metrica3.metric("Severidad estimada", analisis["severidad"])
 
-    ruta_etiquetas = "data/etiquetas_imagenes.csv"
-    if os.path.exists(ruta_etiquetas):
-        st.markdown("#### Fotos etiquetadas")
-        st.dataframe(pd.read_csv(ruta_etiquetas), use_container_width=True)
+        st.markdown("#### Registrar patologia")
+        with st.form("registro_foto_deteccion", clear_on_submit=False):
+            tramo = st.text_input("Tramo (ej. HCO-01)")
+            fecha = st.date_input("Fecha de inspeccion", value=date.today(), key="fecha_foto_deteccion")
+            tipo = st.selectbox("Tipo de patologia", TIPOS, key="tipo_foto_deteccion")
+            severidad = st.selectbox(
+                "Severidad observada", SEVERIDADES,
+                index=SEVERIDADES.index(analisis["severidad"]), key="sev_foto_deteccion",
+            )
+            guardar = st.form_submit_button("Guardar inspeccion")
+
+        if guardar:
+            errores = validar_patologia(tramo, tipo, severidad, fecha)
+            if errores:
+                for error in errores:
+                    st.error(error)
+            else:
+                os.makedirs(FOTOS, exist_ok=True)
+                nombre_seguro = os.path.basename(imagen.name).replace("\\", "_").replace("/", "_")
+                nombre = f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{nombre_seguro}"
+                with open(os.path.join(FOTOS, nombre), "wb") as archivo:
+                    archivo.write(imagen.getvalue())
+                fila = pd.DataFrame(
+                    [[tramo.strip(), fecha, tipo, severidad, nombre]], columns=COLUMNAS
+                )
+                fila.to_csv(REGISTRO, mode="a", header=not os.path.exists(REGISTRO), index=False)
+                st.success("Inspeccion guardada con la fotografia.")
+
+    st.markdown("#### Registro de patologias")
+    registro = leer_registro()
+    st.dataframe(registro, use_container_width=True)
